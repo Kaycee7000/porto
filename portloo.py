@@ -94,7 +94,7 @@ async def generate_portfolio(request: AuthRequest):
     """
     
     json_response = gemini_client.models.generate_content(
-        model='gemini-1.5-pro-latest',
+        model='gemini-2.5-pro-latest',
         contents=json_prompt,
         config=types.GenerateContentConfig(
             response_mime_type="application/json"
@@ -117,7 +117,7 @@ async def generate_portfolio(request: AuthRequest):
     """
     
     css_response = gemini_client.models.generate_content(
-        model='gemini-1.5-flash-latest',
+        model='gemini-2.5-flash-latest',
         contents=css_prompt
     )
     theme_css = css_response.text.replace("```css", "").replace("```", "").strip()
