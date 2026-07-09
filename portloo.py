@@ -97,7 +97,7 @@ async def generate_portfolio(request: AuthRequest):
         model='gemini-2.5-pro-latest',
         contents=json_prompt,
         config=types.GenerateContentConfig(
-            response_mime_type="application/json"
+            system_instruction="You are a strict data parser. You must return ONLY raw, valid JSON. Do not use markdown blocks. Do not include any text before or after the JSON."
         )
     )
     portfolio_data = json.loads(json_response.text)
