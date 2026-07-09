@@ -19,7 +19,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 # The new SDK automatically detects the GEMINI_API_KEY in your environment variables!
-gemini_client = genai.Client()
+gemini_client = genai.Client(http_options={'api_version': 'v1'})
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI()
