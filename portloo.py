@@ -140,7 +140,7 @@ async def generate_portfolio(request: AuthRequest):
       "skills": [{{ "title": "Data", "items": ["Py"] }}]
     }}
     """
-    json_response = gemini_client.models.generate_content(model='gemini-2.5-pro', contents=json_prompt)
+    json_response = gemini_client.models.generate_content(model='gemini-3.1-pro', contents=json_prompt)
     portfolio_data = json.loads(json_response.text.replace("```json", "").replace("```", "").strip())
 
     # GEMINI PHASE 2: Design Tokens
@@ -150,7 +150,7 @@ async def generate_portfolio(request: AuthRequest):
     Return ONLY JSON matching this exact schema:
     {{"background": "oklch(1 0 0)", "foreground": "oklch(0.1 0.04 265)", "primary": "oklch(0.2 0.04 265)", "primary_foreground": "oklch(0.9 0.003 247)", "border": "oklch(0.9 0.01 255)"}}
     """
-    token_response = gemini_client.models.generate_content(model='gemini-2.5-flash', contents=token_prompt)
+    token_response = gemini_client.models.generate_content(model='gemini-3.5-flash', contents=token_prompt)
     design_tokens = json.loads(token_response.text.replace("```json", "").replace("```", "").strip())
 
     # =========================================================================
