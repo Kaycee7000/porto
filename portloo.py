@@ -75,7 +75,7 @@ async def generate_portfolio(request: AuthRequest):
 
     # 4. GEMINI PHASE 1: Generate JSON Data
     print("Asking Gemini to generate JSON Portfolio Data...")
-    model_pro = genai.GenerativeModel('gemini-1.5-pro')
+    model_pro = genai.GenerativeModel('gemini-1.5-pro-latest')
     json_prompt = f"""
     Analyze these college documents and extract the student's coursework into this exact JSON schema.
     [RAW DATA]
@@ -108,7 +108,7 @@ async def generate_portfolio(request: AuthRequest):
     .dark {{ --background: oklch(0.1 0.04 265); }}
     @layer base {{ body {{ background-color: var(--background); color: var(--foreground); }} }}
     """
-    model_flash = genai.GenerativeModel('gemini-1.5-flash')
+    model_flash = genai.GenerativeModel('gemini-1.5-flash-latest')
     css_response = model_flash.generate_content(css_prompt)
     theme_css = css_response.text.replace("```css", "").replace("```", "").strip()
 
