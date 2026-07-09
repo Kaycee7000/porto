@@ -18,7 +18,7 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 # The new SDK automatically detects the GEMINI_API_KEY in your environment variables!
-gemini_client = genai.Client(http_options={'api_version': 'v1'})
+gemini_client = genai.Client()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI()
@@ -140,7 +140,7 @@ async def generate_portfolio(request: AuthRequest):
       "skills": [{{ "title": "Data", "items": ["Py"] }}]
     }}
     """
-    json_response = gemini_client.models.generate_content(model='gemini-3.1-pro', contents=json_prompt)
+    json_response = gemini_client.models.generate_content(model='gemini-3.5-flash', contents=json_prompt)
     portfolio_data = json.loads(json_response.text.replace("```json", "").replace("```", "").strip())
 
     # GEMINI PHASE 2: Design Tokens
