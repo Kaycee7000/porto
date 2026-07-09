@@ -4,3 +4,4 @@ requests
 supabase
 google-genai
 python-dotenv
+pydantic
