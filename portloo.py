@@ -406,7 +406,7 @@ How to build the "projects" array:
     supabase.table("portfolios").upsert(final_db_row, on_conflict="student_id").execute()
 
     print(f"SUCCESS! Live at: /{final_db_row['student_id']}")
-    return {"url": f"/{final_db_row['student_id']}", "template": final_db_row['template_id']}
+    return {"url": f"/{final_db_row['student_id']}", "template": final_db_row['template_id'], "student_id": final_db_row['student_id']}
 
 if __name__ == "__main__":
     import uvicorn
