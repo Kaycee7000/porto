@@ -2,6 +2,9 @@ fastapi
 uvicorn
 requests
 supabase
-google-genai
+# google-genai
 python-dotenv
 pydantic
+anthropic
+python-docx
+python-multipart
