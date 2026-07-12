@@ -199,12 +199,13 @@ def send_receipt_email(user_email: str, pdf_bytes: bytes, session_id: str):
 
 def process_premium_upgrade(session: dict):
     """Executes asynchronously to update DB, generate PDF, and send email."""
-    student_id = session.get("client_reference_id")
-    stripe_session_id = session.get("id")
-    amount_total = session.get("amount_total", 0) / 100 
+    student_id = getattr(session, "client_reference_id", None)
+    stripe_session_id = getattr(session, "id", None)
+    amount_total = getattr(session, "amount_total", 0) / 100
     
     if not student_id:
-        return
+       print("❌ No student_id found in Stripe session.")
+       return
 
     print(f"🔄 Background Task Started: Upgrading {student_id}...")
 
@@ -250,12 +251,13 @@ def process_premium_upgrade(session: dict):
         }).execute()
 
     # 5. Invoke transactional Email API to dispatch receipt + PDF copy
-    user_email = session.get("customer_details", {}).get("email")
+    customer_details = getattr(session, "customer_details", None)
+    user_email = getattr(customer_details, "email", None) if customer_details else None
+    
     if user_email:
         send_receipt_email(user_email, raw_pdf_bytes, stripe_session_id)
     else:
         print("⚠️ No email found in Stripe session to send receipt.")
-
 
 # =========================================================================
 # 5. API ROUTES
