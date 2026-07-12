@@ -111,6 +111,7 @@ class FinalSupabaseRow(BaseModel):
     portfolio_data: dict
     theme_css: str
     is_premium: bool = False
+    tokens_remaining: int = 0
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 # =========================================================================
@@ -226,6 +227,77 @@ def run_claude(messages: list, model: str, max_tokens: int = 4096, tools: Option
 # =========================================================================
 # 4. THE API ROUTE
 # =========================================================================
+class RegenerateRequest(BaseModel):
+    student_id: str
+
+@app.post("/api/regenerate-theme")
+async def regenerate_theme(req: RegenerateRequest):
+    print(f"Attempting to regenerate theme for {req.student_id}...")
+    
+    # 1. Fetch current portfolio from Supabase
+    response = supabase.table("portfolios").select("*").eq("student_id", req.student_id).execute()
+    data = response.data
+    
+    if not data:
+        raise HTTPException(status_code=404, detail="Portfolio not found.")
+        
+    portfolio = data[0]
+    
+    # 2. Verify token balance
+    tokens = portfolio.get("tokens_remaining", 0)
+    if tokens <= 0:
+        raise HTTPException(status_code=403, detail="Out of regeneration tokens. Please upgrade to Premium.")
+        
+    # 3. Ask Claude for a fresh set of design tokens based on existing data
+    print("Generating fresh Design Tokens...")
+    token_prompt = f"""
+    Based on this student data: {json.dumps(portfolio['portfolio_data'])}, generate 5 CSS oklch color tokens that fit the student's field/profession.
+    Ensure this color palette is distinctly DIFFERENT from their previous design.
+    Return ONLY JSON matching this exact schema:
+    {{"background": "oklch(1 0 0)", "foreground": "oklch(0.1 0.04 265)", "primary": "oklch(0.2 0.04 265)", "primary_foreground": "oklch(0.9 0.003 247)", "border": "oklch(0.9 0.01 255)"}}
+    """
+    
+    token_text = run_claude(
+        [{"role": "user", "content": token_prompt}],
+        model=CLAUDE_MODEL_DESIGN,
+        max_tokens=512,
+    )
+
+    try:
+        new_design_tokens = extract_json_block(token_text)
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(status_code=502, detail="Could not parse new design tokens from Claude.")
+
+    # 4. Re-compile the CSS and pick a new random template
+    tokens_obj = DesignTokens(**new_design_tokens)
+    compiled_css = f"""
+    :root {{
+        --radius: 0.625rem;
+        --background: {tokens_obj.background};
+        --foreground: {tokens_obj.foreground};
+        --primary: {tokens_obj.primary};
+        --primary-foreground: {tokens_obj.primary_foreground};
+        --border: {tokens_obj.border};
+    }}
+    @layer base {{
+        * {{ border-color: var(--border); }}
+        body {{ background-color: var(--background); color: var(--foreground); }}
+    }}
+    """
+    
+    new_template = random.choice(TEMPLATES)
+    
+    # 5. Deduct token and update database
+    update_data = {
+        "theme_css": compiled_css,
+        "template_id": new_template,
+        "tokens_remaining": tokens - 1
+    }
+    
+    supabase.table("portfolios").update(update_data).eq("student_id", req.student_id).execute()
+    
+    return {"message": "Theme regenerated successfully", "tokens_remaining": tokens - 1}
+  
 @app.post("/api/generate-portfolio")
 async def generate_portfolio(
     resume: UploadFile = File(...),
