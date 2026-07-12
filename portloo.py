@@ -65,8 +65,9 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://thediyblogger.com",],
-    allow_credentials=False,
+    allow_origins=["https://thediyblogger.com", "http://localhost:4321"],
+    allow_origin_regex=r"https:\/\/.*\.pages\.dev",
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
