@@ -5,24 +5,12 @@ CHANGES IN THIS REVISION
 -------------------------
 - Data source:  OneDrive (Microsoft Graph token + "Smart Filter" search)
                  -> Resume upload (PDF / DOCX / plain text, capped at 10MB).
-- LLM:           Gemini -> Claude (Anthropic API). Resume analysis now runs
-                 with Claude's web_search tool enabled so it can look up a
-                 student's real, publicly-published capstone/project work
-                 (a lot of schools publish these) using their name + school,
-                 and falls back to generating representative coursework
-                 projects for that school/program when nothing specific
-                 turns up.
-- UNCHANGED:     The deterministic compiler (DesignTokens / FinalSupabaseRow /
-                 compile_portfolio_row) and the Supabase write. Both Claude
-                 calls still just hand a plain dict to compile_portfolio_row,
-                 exactly like the Gemini calls used to.
-
-The original OneDrive + Gemini code is left in place below, commented out,
-so it can be restored quickly if needed.
+- LLM:           Gemini -> Claude (Anthropic API). 
+- UNCHANGED:     The deterministic compiler and the Supabase write.
+- PAYMENTS:      Stripe Webhooks & Resend Emails integrated via FastAPI Background Tasks.
 
 NEW DEPENDENCIES FOR THIS REVISION:
-    pip install anthropic python-docx python-multipart
-(python-multipart is required by FastAPI for UploadFile/Form parsing.)
+    pip install anthropic python-docx python-multipart stripe resend
 """
 
 import os
@@ -32,33 +20,33 @@ import uuid
 import base64
 import random
 import requests
+from io import BytesIO
 from datetime import datetime, timezone
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
-import anthropic  # NEW: replaces Gemini for both analysis + design tokens
-from docx import Document  # NEW: pip install python-docx - extracts text from .docx resumes
+import anthropic  
+from docx import Document  
+import stripe
+import resend
 
-# --- LEGACY (disabled): Gemini SDK ------------------------------------------
-# from google import genai
-# -----------------------------------------------------------------------------
-
+# =========================================================================
 # SETUP & SECURE ENVIRONMENT VARIABLES
+# =========================================================================
 load_dotenv()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
-# --- LEGACY (disabled): Gemini client ---------------------------------------
-# The new SDK automatically detects the GEMINI_API_KEY in your environment variables!
-# gemini_client = genai.Client()
-# -----------------------------------------------------------------------------
+STRIPE_API_KEY = os.getenv("STRIPE_API_KEY")
+STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET")
+RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 
-# Claude client - reads ANTHROPIC_API_KEY from the environment automatically
+stripe.api_key = STRIPE_API_KEY
+resend.api_key = RESEND_API_KEY
 claude_client = anthropic.Anthropic()
-
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 app = FastAPI()
@@ -72,19 +60,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- LEGACY (disabled): OneDrive OAuth request body -------------------------
-# class AuthRequest(BaseModel):
-#     access_token: str
-# -----------------------------------------------------------------------------
-
-# Model routing. Pin exact IDs so behavior doesn't shift under you when
-# Anthropic ships a new default model. Sonnet 5 drives both calls below;
-# swap CLAUDE_MODEL_DESIGN for something like "claude-haiku-4-5-20251001"
-# if you want to shave cost off the token step - it's a small, tool-free call.
-CLAUDE_MODEL_ANALYSIS = "claude-sonnet-5"   # resume analysis + project discovery (web search)
-CLAUDE_MODEL_DESIGN = "claude-sonnet-5"     # design token generation
-
-MAX_RESUME_BYTES = 10 * 1024 * 1024  # 10MB resume size cap
+CLAUDE_MODEL_ANALYSIS = "claude-sonnet-5"
+CLAUDE_MODEL_DESIGN = "claude-sonnet-5"
+MAX_RESUME_BYTES = 10 * 1024 * 1024  
 
 TEMPLATES = [
     "ClassicPortfolioTemplate", "ArchitectureStudioTemplate", "MedicalClinicTemplate",
@@ -95,7 +73,7 @@ TEMPLATES = [
 ]
 
 # =========================================================================
-# 1. DETERMINISTIC SCHEMAS (The Gatekeepers) -- UNCHANGED
+# 1. DETERMINISTIC SCHEMAS (The Gatekeepers) 
 # =========================================================================
 class DesignTokens(BaseModel):
     background: str
@@ -115,18 +93,12 @@ class FinalSupabaseRow(BaseModel):
     created_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
 # =========================================================================
-# 2. THE COMPILER FUNCTION -- UNCHANGED
+# 2. THE COMPILER FUNCTION 
 # =========================================================================
 def compile_portfolio_row(student_name: str, raw_portfolio_json: dict, raw_tokens_json: dict) -> dict:
-    """Takes AI outputs, enforces schema, compiles CSS, and returns a perfect DB row."""
-
-    # 1. Assign deterministic student ID
     student_id = student_name.lower().replace(" ", "-")
-
-    # 2. Validate Design Tokens
     tokens = DesignTokens(**raw_tokens_json)
 
-    # 3. Compile Tokens into valid Astro CSS string
     compiled_css = f"""
     :root {{
         --radius: 0.625rem;
@@ -142,29 +114,19 @@ def compile_portfolio_row(student_name: str, raw_portfolio_json: dict, raw_token
     }}
     """
 
-    # 4. Compile the Final Row
     final_row = FinalSupabaseRow(
         student_id=student_id,
         template_id=random.choice(TEMPLATES),
         portfolio_data=raw_portfolio_json,
         theme_css=compiled_css
     )
-
-    # Returns a validated, pure dictionary ready for Supabase
     return final_row.model_dump()
 
 
 # =========================================================================
-# 3. RESUME INTAKE + CLAUDE HELPERS (NEW - replaces OneDrive + Gemini)
+# 3. HELPER FUNCTIONS (Claude & Resume Extraction)
 # =========================================================================
 def extract_resume_content(filename: str, content_type: str, file_bytes: bytes) -> list:
-    """
-    Turns an uploaded resume into Claude message content blocks.
-      - PDF    -> sent natively as a `document` block (Claude reads layout/tables directly).
-      - DOCX   -> Claude's document blocks don't accept .docx, so extract text first.
-      - TXT/MD -> UTF-8 decode as plain text.
-    Anything else is rejected with a clear error rather than guessed at.
-    """
     name = (filename or "").lower()
     ext = name.rsplit(".", 1)[-1] if "." in name else ""
     content_type = content_type or ""
@@ -192,11 +154,6 @@ def extract_resume_content(filename: str, content_type: str, file_bytes: bytes) 
 
 
 def extract_json_block(raw_text: str) -> dict:
-    """
-    Pulls a JSON object out of a Claude response, tolerating stray markdown
-    fences or commentary Claude may add (common once web search is enabled,
-    since Claude sometimes narrates its search before answering).
-    """
     cleaned = raw_text.replace("```json", "").replace("```", "").strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start == -1 or end == -1 or end < start:
@@ -205,12 +162,6 @@ def extract_json_block(raw_text: str) -> dict:
 
 
 def run_claude(messages: list, model: str, max_tokens: int = 4096, tools: Optional[list] = None) -> str:
-    """
-    Calls Claude and concatenates the text blocks of the final response.
-    Long tool-use chains (e.g. several web searches) can pause a turn; if
-    that happens we just resume with the same tools until Claude actually
-    stops on its own.
-    """
     request_kwargs = {"model": model, "max_tokens": max_tokens}
     if tools:
         request_kwargs["tools"] = tools
@@ -225,8 +176,115 @@ def run_claude(messages: list, model: str, max_tokens: int = 4096, tools: Option
 
 
 # =========================================================================
-# 4. THE API ROUTE
+# 4. BACKGROUND WORKERS & EMAILS (Payments)
 # =========================================================================
+def send_receipt_email(user_email: str, pdf_bytes: bytes, session_id: str):
+    """Fires an email via Resend with the generated PDF attached."""
+    try:
+        resend.Emails.send({
+            "from": "Portloo Billing <receipts@thediyblogger.com>",
+            "to": [user_email],
+            "subject": "Your Portloo Premium Receipt",
+            "html": "<h2>Welcome to Premium!</h2><p>Your account has been upgraded and 5 theme regeneration tokens have been added to your dashboard. Your receipt is attached below.</p>",
+            "attachments": [
+                {
+                    "filename": f"Portloo_Invoice_{session_id}.pdf",
+                    "content": list(pdf_bytes)  # Resend requires the raw bytes as a list
+                }
+            ]
+        })
+        print(f"✉️ Receipt successfully sent to {user_email}")
+    except Exception as e:
+        print(f"⚠️ Email Error: {e}")
+
+def process_premium_upgrade(session: dict):
+    """Executes asynchronously to update DB, generate PDF, and send email."""
+    student_id = session.get("client_reference_id")
+    stripe_session_id = session.get("id")
+    amount_total = session.get("amount_total", 0) / 100 
+    
+    if not student_id:
+        return
+
+    print(f"🔄 Background Task Started: Upgrading {student_id}...")
+
+    # 1. Update Portfolio Premium Status & Reset Tokens
+    db_response = supabase.table("portfolios").update({
+        "is_premium": True,
+        "tokens_remaining": 5
+    }).eq("student_id", student_id).execute()
+    
+    if not db_response.data:
+        print(f"❌ Failed to find portfolio row for {student_id}")
+        return
+        
+    user_id = db_response.data[0].get("user_id")
+
+    # 2. Generate Invoice PDF programmatically (Placeholder for actual PDF layout generation)
+    pdf_buffer = BytesIO()
+    pdf_buffer.write(b"%PDF-1.4 Mock Invoice Data...") 
+    pdf_buffer.seek(0)
+    raw_pdf_bytes = pdf_buffer.getvalue()
+    
+    # 3. Upload PDF to Supabase Storage Bucket
+    file_name = f"inv_{stripe_session_id}.pdf"
+    bucket_path = f"{user_id}/{file_name}" if user_id else f"anonymous/{file_name}"
+    
+    try:
+        supabase.storage.from_("invoices").upload(
+            path=bucket_path,
+            file=raw_pdf_bytes,
+            file_options={"content-type": "application/pdf"}
+        )
+        print(f"📁 Invoice PDF saved securely to storage path: invoices/{bucket_path}")
+    except Exception as e:
+        print(f"⚠️ Storage Upload Warning: {e}")
+
+    # 4. Log Row to Invoice History Table
+    if user_id:
+        supabase.table("invoices").insert({
+            "user_id": user_id,
+            "stripe_session_id": stripe_session_id,
+            "amount": amount_total,
+            "pdf_path": bucket_path
+        }).execute()
+
+    # 5. Invoke transactional Email API to dispatch receipt + PDF copy
+    user_email = session.get("customer_details", {}).get("email")
+    if user_email:
+        send_receipt_email(user_email, raw_pdf_bytes, stripe_session_id)
+    else:
+        print("⚠️ No email found in Stripe session to send receipt.")
+
+
+# =========================================================================
+# 5. API ROUTES
+# =========================================================================
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        # Enqueue execution to background runner threads immediately
+        background_tasks.add_task(process_premium_upgrade, session)
+        print("⚡ Webhook verified. Task offloaded to background processor.")
+
+    # Return immediate 200 OK acknowledgment to Stripe in under 200ms
+    return {"status": "received"}
+
+
 class RegenerateRequest(BaseModel):
     student_id: str
 
@@ -234,7 +292,6 @@ class RegenerateRequest(BaseModel):
 async def regenerate_theme(req: RegenerateRequest):
     print(f"Attempting to regenerate theme for {req.student_id}...")
     
-    # 1. Fetch current portfolio from Supabase
     response = supabase.table("portfolios").select("*").eq("student_id", req.student_id).execute()
     data = response.data
     
@@ -243,12 +300,10 @@ async def regenerate_theme(req: RegenerateRequest):
         
     portfolio = data[0]
     
-    # 2. Verify token balance
     tokens = portfolio.get("tokens_remaining", 0)
     if tokens <= 0:
         raise HTTPException(status_code=403, detail="Out of regeneration tokens. Please upgrade to Premium.")
         
-    # 3. Ask Claude for a fresh set of design tokens based on existing data
     print("Generating fresh Design Tokens...")
     token_prompt = f"""
     Based on this student data: {json.dumps(portfolio['portfolio_data'])}, generate 5 CSS oklch color tokens that fit the student's field/profession.
@@ -268,7 +323,6 @@ async def regenerate_theme(req: RegenerateRequest):
     except (ValueError, json.JSONDecodeError) as e:
         raise HTTPException(status_code=502, detail="Could not parse new design tokens from Claude.")
 
-    # 4. Re-compile the CSS and pick a new random template
     tokens_obj = DesignTokens(**new_design_tokens)
     compiled_css = f"""
     :root {{
@@ -287,7 +341,6 @@ async def regenerate_theme(req: RegenerateRequest):
     
     new_template = random.choice(TEMPLATES)
     
-    # 5. Deduct token and update database
     update_data = {
         "theme_css": compiled_css,
         "template_id": new_template,
@@ -295,65 +348,15 @@ async def regenerate_theme(req: RegenerateRequest):
     }
     
     supabase.table("portfolios").update(update_data).eq("student_id", req.student_id).execute()
-    
     return {"message": "Theme regenerated successfully", "tokens_remaining": tokens - 1}
-  
+
+
 @app.post("/api/generate-portfolio")
 async def generate_portfolio(
     resume: UploadFile = File(...),
     student_name: Optional[str] = Form(None),
     school: Optional[str] = Form(None),
 ):
-    # --- LEGACY (disabled): OneDrive token exchange + Smart Filter + Gemini calls ---
-    # headers = {"Authorization": f"Bearer {request.access_token}"}
-    #
-    # # Fetch User
-    # print("Fetching User Profile...")
-    # profile_res = requests.get("https://graph.microsoft.com/v1.0/me", headers=headers)
-    # if not profile_res.ok:
-    #     raise HTTPException(status_code=401, detail="Invalid token")
-    #
-    # user_data = profile_res.json()
-    # student_name = user_data.get("displayName", "Student Name")
-    #
-    # # The Smart Filter
-    # print("Running Smart Filter...")
-    # search_res = requests.get("https://graph.microsoft.com/v1.0/me/drive/root/search(q='capstone OR project OR lab OR thesis')?$top=10", headers=headers)
-    # files = search_res.json().get("value", [])
-    #
-    # text_corpus = ""
-    # for f in files:
-    #     url = f.get("@microsoft.graph.downloadUrl")
-    #     if url and f["name"].endswith(('.txt', '.md', '.csv', '.py', '.js', '.json')):
-    #         text_corpus += f"\n--- {f['name']} ---\n{requests.get(url).text[:5000]}"
-    #
-    # # GEMINI PHASE 1: Portfolio JSON
-    # print("Generating Portfolio Data...")
-    # json_prompt = f"""
-    # Extract the student's coursework into this exact JSON schema. Return ONLY JSON.
-    # [DATA] {text_corpus}
-    #
-    # {{
-    #   "profile": {{"name": "{student_name}", "title": "IT Professional", "headline": "Summary", "bio": "Bio", "email": "email", "linkedin": "url"}},
-    #   "projects": [{{ "id": "p1", "title": "Proj", "short": "Sum", "tech": ["Py"], "detailHeader": "Det", "full": "Desc", "achievements": ["Ach"], "visualType": "systems" }}],
-    #   "skills": [{{ "title": "Data", "items": ["Py"] }}]
-    # }}
-    # """
-    # json_response = gemini_client.models.generate_content(model='gemini-3.5-flash', contents=json_prompt)
-    # portfolio_data = json.loads(json_response.text.replace("```json", "").replace("```", "").strip())
-    #
-    # # GEMINI PHASE 2: Design Tokens
-    # print("Generating Design Tokens...")
-    # token_prompt = f"""
-    # Based on this data: {json_response.text}, generate 5 CSS oklch color tokens that fit the industry vibe.
-    # Return ONLY JSON matching this exact schema:
-    # {{"background": "oklch(1 0 0)", "foreground": "oklch(0.1 0.04 265)", "primary": "oklch(0.2 0.04 265)", "primary_foreground": "oklch(0.9 0.003 247)", "border": "oklch(0.9 0.01 255)"}}
-    # """
-    # token_response = gemini_client.models.generate_content(model='gemini-3.5-flash', contents=token_prompt)
-    # design_tokens = json.loads(token_response.text.replace("```json", "").replace("```", "").strip())
-    # ----------------------------------------------------------------------------------
-
-    # Resume intake
     print("Reading uploaded resume...")
     resume_bytes = await resume.read()
     if not resume_bytes:
@@ -373,7 +376,6 @@ async def generate_portfolio(
     if school:
         known_facts.append(f"The student's school is: {school}.")
 
-    # CLAUDE PHASE 1: Resume Analysis + Project Discovery (web search enabled)
     print("Analyzing resume + discovering projects with Claude...")
     analysis_instructions = (
         "You are building a public student portfolio site from the attached resume.\n"
@@ -445,7 +447,6 @@ How to build the "projects" array:
 
     resolved_name = student_name or portfolio_data.get("profile", {}).get("name", "Student Name")
 
-    # CLAUDE PHASE 2: Design Tokens
     print("Generating Design Tokens...")
     token_prompt = f"""
     Based on this data: {json.dumps(portfolio_data)}, generate 5 CSS oklch color tokens that fit the student's field/profession.
@@ -464,9 +465,6 @@ How to build the "projects" array:
         print(f"Design token parsing failed: {e}")
         raise HTTPException(status_code=502, detail="Could not parse design tokens from Claude.")
 
-    # =========================================================================
-    # THE COMPILER IN ACTION -- UNCHANGED
-    # =========================================================================
     print("Running Deterministic Compiler...")
     try:
         final_db_row = compile_portfolio_row(resolved_name, portfolio_data, design_tokens)
@@ -474,12 +472,12 @@ How to build the "projects" array:
         print(f"Compiler Validation Failed: {e}")
         raise HTTPException(status_code=500, detail="Data validation failed.")
 
-    # PUSH TO SUPABASE -- UNCHANGED
     print("Pushing validated row to Supabase...")
     supabase.table("portfolios").upsert(final_db_row, on_conflict="student_id").execute()
 
     print(f"SUCCESS! Live at: /{final_db_row['student_id']}")
     return {"url": f"/{final_db_row['student_id']}", "template": final_db_row['template_id'], "student_id": final_db_row['student_id']}
+
 
 if __name__ == "__main__":
     import uvicorn
