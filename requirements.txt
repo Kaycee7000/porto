@@ -8,3 +8,4 @@ pydantic
 anthropic
 python-docx
 python-multipart
+resend
