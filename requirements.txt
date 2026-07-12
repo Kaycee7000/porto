@@ -9,3 +9,4 @@ anthropic
 python-docx
 python-multipart
 resend
+stripe
