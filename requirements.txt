@@ -10,3 +10,4 @@ python-docx
 python-multipart
 resend
 stripe
+sentry-sdk
