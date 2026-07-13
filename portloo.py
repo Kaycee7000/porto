@@ -22,6 +22,7 @@ import random
 import requests
 from io import BytesIO
 from datetime import datetime, timezone
+import sentry_sdk
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -48,6 +49,21 @@ stripe.api_key = STRIPE_API_KEY
 resend.api_key = RESEND_API_KEY
 claude_client = anthropic.Anthropic()
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+# =========================================================================
+# SENTRY (error tracking)
+# =========================================================================
+sentry_sdk.init(
+    dsn=os.getenv(
+        "SENTRY_DSN",
+        "https://656ee7113846d7e01ecb6a2aa7d5d193@o4511700341555200.ingest.us.sentry.io/4511729236901888",
+    ),
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+    # Percentage of requests to trace for performance monitoring (0.0 - 1.0).
+    traces_sample_rate=float(os.getenv("SENTRY_TRACES_SAMPLE_RATE", "0.2")),
+)
 
 app = FastAPI()
 
@@ -479,6 +495,11 @@ How to build the "projects" array:
 
     print(f"SUCCESS! Live at: /{final_db_row['student_id']}")
     return {"url": f"/{final_db_row['student_id']}", "template": final_db_row['template_id'], "student_id": final_db_row['student_id']}
+
+@app.get("/sentry-debug")
+async def trigger_error():
+    """Temporary route to verify Sentry is receiving events. Safe to remove once confirmed."""
+    division_by_zero = 1 / 0
 
 
 if __name__ == "__main__":
