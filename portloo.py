@@ -496,11 +496,6 @@ How to build the "projects" array:
     print(f"SUCCESS! Live at: /{final_db_row['student_id']}")
     return {"url": f"/{final_db_row['student_id']}", "template": final_db_row['template_id'], "student_id": final_db_row['student_id']}
 
-@app.get("/sentry-debug")
-async def trigger_error():
-    """Temporary route to verify Sentry is receiving events. Safe to remove once confirmed."""
-    division_by_zero = 1 / 0
-
 
 if __name__ == "__main__":
     import uvicorn
