@@ -23,7 +23,7 @@ import requests
 from io import BytesIO
 from datetime import datetime, timezone
 import sentry_sdk
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request, BackgroundTasks, Header
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Dict, Optional
@@ -307,20 +307,40 @@ class RegenerateRequest(BaseModel):
     student_id: str
 
 @app.post("/api/regenerate-theme")
-async def regenerate_theme(req: RegenerateRequest):
+async def regenerate_theme(req: RegenerateRequest, authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing or invalid authentication token.")
+
+    token = authorization.split(" ")[1]
+
+    try:
+        user_auth = supabase.auth.get_user(token)
+        true_user_id = user_auth.user.id
+    except Exception:
+        raise HTTPException(status_code=401, detail="Authentication failed or token expired.")
+        
     print(f"Attempting to regenerate theme for {req.student_id}...")
     
+    # 1. Reach out to Supabase exactly like before
     response = supabase.table("portfolios").select("*").eq("student_id", req.student_id).execute()
-    data = response.data
     
-    if not data:
+    # 2. Verify the portfolio actually exists
+    if not response.data:
         raise HTTPException(status_code=404, detail="Portfolio not found.")
         
-    portfolio = data[0]
+    portfolio = response.data[0]
     
+    # 3. SECURITY GUARDRAIL: Stop users from editing other people's data
+    if portfolio.get("user_id") != true_user_id:
+        raise HTTPException(status_code=403, detail="Unauthorized access. You do not own this portfolio.")
+
+    # 4. BUSINESS LOGIC: Enforce your premium token limits
     tokens = portfolio.get("tokens_remaining", 0)
     if tokens <= 0:
         raise HTTPException(status_code=403, detail="Out of regeneration tokens. Please upgrade to Premium.")
+        
+    # 5. RACE CONDITION FIX: Deduct the token immediately BEFORE calling Claude!
+    supabase.table("portfolios").update({"tokens_remaining": tokens - 1}).eq("student_id", req.student_id).execute()
         
     print("Generating fresh Design Tokens...")
     token_prompt = f"""
@@ -330,16 +350,17 @@ async def regenerate_theme(req: RegenerateRequest):
     {{"background": "oklch(1 0 0)", "foreground": "oklch(0.1 0.04 265)", "primary": "oklch(0.2 0.04 265)", "primary_foreground": "oklch(0.9 0.003 247)", "border": "oklch(0.9 0.01 255)"}}
     """
     
-    token_text = run_claude(
-        [{"role": "user", "content": token_prompt}],
-        model=CLAUDE_MODEL_DESIGN,
-        max_tokens=512,
-    )
-
     try:
+        token_text = run_claude(
+            [{"role": "user", "content": token_prompt}],
+            model=CLAUDE_MODEL_DESIGN,
+            max_tokens=512,
+        )
         new_design_tokens = extract_json_block(token_text)
-    except (ValueError, json.JSONDecodeError) as e:
-        raise HTTPException(status_code=502, detail="Could not parse new design tokens from Claude.")
+    except Exception as e:
+        # If Claude fails, refund the token!
+        supabase.table("portfolios").update({"tokens_remaining": tokens}).eq("student_id", req.student_id).execute()
+        raise HTTPException(status_code=502, detail="Could not parse new design tokens from Claude. Token refunded.")
 
     tokens_obj = DesignTokens(**new_design_tokens)
     compiled_css = f"""
@@ -359,13 +380,14 @@ async def regenerate_theme(req: RegenerateRequest):
     
     new_template = random.choice(TEMPLATES)
     
+    # Update the CSS and Template (Tokens were already deducted!)
     update_data = {
         "theme_css": compiled_css,
-        "template_id": new_template,
-        "tokens_remaining": tokens - 1
+        "template_id": new_template
     }
     
     supabase.table("portfolios").update(update_data).eq("student_id", req.student_id).execute()
+    
     return {"message": "Theme regenerated successfully", "tokens_remaining": tokens - 1}
 
 
