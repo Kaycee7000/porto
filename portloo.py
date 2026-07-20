@@ -69,7 +69,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://thediyblogger.com", "http://localhost:4321"],
+    allow_origins=["https://otilof.com", "http://localhost:4321"],
     allow_origin_regex=r"https:\/\/.*\.pages\.dev",
     allow_credentials=True,
     allow_methods=["*"],
@@ -198,7 +198,7 @@ def send_receipt_email(user_email: str, pdf_bytes: bytes, session_id: str):
     """Fires an email via Resend with the generated PDF attached."""
     try:
         resend.Emails.send({
-            "from": "Portloo Billing <receipts@thediyblogger.com>",
+            "from": "Portloo Billing <receipts@otilof.com>",
             "to": [user_email],
             "subject": "Your Portloo Premium Receipt",
             "html": "<h2>Welcome to Premium!</h2><p>Your account has been upgraded and 5 theme regeneration tokens have been added to your dashboard. Your receipt is attached below.</p>",
